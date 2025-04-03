@@ -1,50 +1,91 @@
-import speech_recognition as sr
-import difflib
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import json
+from deepgram import Deepgram
+import os
+from utils.compare import compare_transcript
+from dotenv import load_dotenv
 
-# User-defined text
-target_text = input("Enter the text you want to memorize:\n").strip()
-target_words = target_text.split()
-revealed = [False] * len(target_words)
+load_dotenv()
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+dg_client = Deepgram(DEEPGRAM_API_KEY)
 
-def print_current_state():
-    output = []
-    for i, word in enumerate(target_words):
-        if revealed[i]:
-            output.append(word)
-        else:
-            output.append("●" * len(word))  # Simulate blur
-    print(" ".join(output))
+app = FastAPI()
 
-recognizer = sr.Recognizer()
-mic = sr.Microphone()
+# Allow frontend connection
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-print("\nStart reciting. Press Ctrl+C to stop.")
-print_current_state()
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("🎤 Client connected to /ws")
 
-try:
-    while not all(revealed):
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source)
-            print("\nListening...")
-            audio = recognizer.listen(source)
-        
-        try:
-            transcript = recognizer.recognize_google(audio)
-            spoken_words = transcript.strip().split()
-            print(f"You said: {transcript}")
+    dg_connection = None
+    reference_script = []
+    word_index = 0
 
-            for spoken_word in spoken_words:
-                for i, (word, done) in enumerate(zip(target_words, revealed)):
-                    if not done and difflib.SequenceMatcher(None, spoken_word.lower(), word.lower()).ratio() > 0.8:
-                        revealed[i] = True
-                        break
+    try:
+        while True:
+            message = await websocket.receive()
 
-            print_current_state()
-        
-        except sr.UnknownValueError:
-            print("Didn't catch that. Try again.")
-        except sr.RequestError:
-            print("Speech service error.")
+            if "text" in message:
+                data = json.loads(message["text"])
 
-except KeyboardInterrupt:
-    print("\nSession ended.")
+                if data.get("type") == "script":
+                    # Receive the reference script once
+                    reference_script = data["payload"].split()
+                    print(f"📜 Script received with {len(reference_script)} words")
+
+                    # Initialize Deepgram connection
+                    dg_connection = await dg_client.transcription.live({
+                        "punctuate": True,
+                        "interim_results": True
+                    })
+
+                    # Start listening to Deepgram responses
+                    async def handle_transcripts():
+                        nonlocal word_index
+                        async for response in dg_connection:
+                            words = response.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "").split()
+                            feedback = compare_transcript(words, reference_script[word_index:])
+                            word_index += len(words)
+                            await websocket.send_text(json.dumps({"type": "transcript", "payload": feedback}))
+
+                    asyncio.create_task(handle_transcripts())
+
+                elif data.get("type") == "end":
+                    print("🔚 Ending session")
+                    break
+
+            elif "bytes" in message:
+                # Audio chunk
+                if dg_connection:
+                    await dg_connection.send(message["bytes"])
+
+    except WebSocketDisconnect:
+        print("⚠️ Client disconnected")
+    finally:
+        if dg_connection:
+            await dg_connection.finish()
+        await websocket.close()
+
+@app.websocket("/listen")
+async def log_audio_chunks(websocket: WebSocket):
+    await websocket.accept()
+    print("🧪 Client connected to /listen (debug)")
+
+    try:
+        while True:
+            audio_chunk = await websocket.receive_bytes()
+            print(f"🎧 Received {len(audio_chunk)} bytes of audio")
+    except WebSocketDisconnect:
+        print("🛑 /listen client disconnected")
+    finally:
+        await websocket.close()

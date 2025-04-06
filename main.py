@@ -13,7 +13,6 @@ dg_client = Deepgram(DEEPGRAM_API_KEY)
 
 app = FastAPI()
 
-# Allow frontend connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,7 +24,7 @@ app.add_middleware(
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🎤 Client connected to /ws")
+    print("✅ Client connected")
 
     dg_connection = None
     reference_script = []
@@ -39,53 +38,43 @@ async def websocket_endpoint(websocket: WebSocket):
                 data = json.loads(message["text"])
 
                 if data.get("type") == "script":
-                    # Receive the reference script once
                     reference_script = data["payload"].split()
-                    print(f"📜 Script received with {len(reference_script)} words")
+                    print(f"📜 Received script with {len(reference_script)} words")
 
-                    # Initialize Deepgram connection
+                    # Initialize Deepgram
                     dg_connection = await dg_client.transcription.live({
                         "punctuate": True,
                         "interim_results": True
                     })
 
-                    # Start listening to Deepgram responses
-                    async def handle_transcripts():
-                        nonlocal word_index
-                        async for response in dg_connection:
-                            words = response.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "").split()
-                            feedback = compare_transcript(words, reference_script[word_index:])
-                            word_index += len(words)
-                            await websocket.send_text(json.dumps({"type": "transcript", "payload": feedback}))
+                    def on_transcript(response):
+                        print("📝 Received response from Deepgram")
+                        words = (
+                            response.get("channel", {})
+                            .get("alternatives", [{}])[0]
+                            .get("transcript", "")
+                            .split()
+                        )
+                        feedback = compare_transcript(words, reference_script[word_index:])
+                        asyncio.create_task(
+                            websocket.send_text(json.dumps({"type": "transcript", "payload": feedback}))
+                        )
 
-                    asyncio.create_task(handle_transcripts())
+                    dg_connection.register_handler(on_transcript)
 
                 elif data.get("type") == "end":
-                    print("🔚 Ending session")
+                    print("🛑 Ending session")
                     break
 
             elif "bytes" in message:
-                # Audio chunk
-                if dg_connection:
+                if dg_connection is not None:
                     await dg_connection.send(message["bytes"])
+                else:
+                    print("⚠️ Tried to send audio before Deepgram was initialized")
 
     except WebSocketDisconnect:
-        print("⚠️ Client disconnected")
+        print("❌ Client disconnected")
     finally:
         if dg_connection:
             await dg_connection.finish()
-        await websocket.close()
-
-@app.websocket("/listen")
-async def log_audio_chunks(websocket: WebSocket):
-    await websocket.accept()
-    print("🧪 Client connected to /listen (debug)")
-
-    try:
-        while True:
-            audio_chunk = await websocket.receive_bytes()
-            print(f"🎧 Received {len(audio_chunk)} bytes of audio")
-    except WebSocketDisconnect:
-        print("🛑 /listen client disconnected")
-    finally:
         await websocket.close()

@@ -60,7 +60,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             websocket.send_text(json.dumps({"type": "transcript", "payload": feedback}))
                         )
 
-                    dg_connection.register_handler(on_transcript)
+                    dg_connection.register_handler("transcriptReceived", on_transcript)
+
 
                 elif data.get("type") == "end":
                     print("🛑 Ending session")

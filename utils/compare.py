@@ -1,22 +1,22 @@
 from fuzzywuzzy import fuzz
 from typing import List, Tuple
 
-def compare_transcript(transcript_words: List[str], reference_words: List[str]) -> List[dict]:
+def compare_transcript(transcript_words: List[str], reference_words: List[str]) -> List[Tuple[str, bool]]:
     """
     Compares each word in the transcript to the reference using fuzzy logic.
-    Returns a list of dicts: { word: str, correct: bool }
+    Returns a list of (word, correct) tuples.
     """
     result = []
     ref_index = 0
 
     for word in transcript_words:
         if ref_index >= len(reference_words):
-            result.append({ "word": word, "correct": False })
+            result.append((word, False))
             continue
 
         score = fuzz.ratio(word.lower(), reference_words[ref_index].lower())
         if score > 80:
-            result.append({ "word": word, "correct": True })
+            result.append((reference_words[ref_index], True))
             ref_index += 1
         else:
             match_found = False
@@ -24,14 +24,15 @@ def compare_transcript(transcript_words: List[str], reference_words: List[str]) 
                 if ref_index + lookahead < len(reference_words):
                     future_score = fuzz.ratio(word.lower(), reference_words[ref_index + lookahead].lower())
                     if future_score > 80:
-                        result.append({ "word": word, "correct": True })
+                        result.append((reference_words[ref_index + lookahead], True))
                         ref_index += lookahead + 1
                         match_found = True
                         break
             if not match_found:
-                result.append({ "word": word, "correct": False })
+                result.append((word, False))
 
     return result
+
 
 
 # For standalone testing

@@ -12,6 +12,7 @@ dg_client = Deepgram(DEEPGRAM_API_KEY)
 
 async def init_deepgram(reference_script, confirmed_words, websocket, ready_event):
     word_index = 0
+    control_state = {"paused": False}
 
     try:
         dg_connection = await dg_client.transcription.live({
@@ -24,7 +25,9 @@ async def init_deepgram(reference_script, confirmed_words, websocket, ready_even
 
         def on_transcript(transcript, **kwargs):
             nonlocal word_index
-            print("📝 Deepgram transcript received")
+            if control_state["paused"]:
+                print("⏸️ Paused: Skipping transcript processing.")
+                return
 
             words = (
                 transcript.get("channel", {})
@@ -43,23 +46,16 @@ async def init_deepgram(reference_script, confirmed_words, websocket, ready_even
 
                 expected_word = reference_script[abs_index]
 
-                if correct and matched_word.lower() == expected_word.lower():
+                if correct:
                     confirmed_words[abs_index]["correct"] = True
 
-
-
-
-            while word_index < len(confirmed_words) and confirmed_words[word_index] == (reference_script[word_index], True):
+            while word_index < len(confirmed_words) and confirmed_words[word_index].get("correct"):
                 word_index += 1
 
             print("🧪 Launching safe_send task")
 
             async def safe_send():
                 try:
-                    print("🧪 Launching safe_send task")
-                    print("📤 Confirmed words sending to frontend:", confirmed_words)
-                    print("📤 WebSocket state (inside safe_send):", websocket.client_state)
-
                     if websocket.client_state == WebSocketState.CONNECTED:
                         await websocket.send_text(json.dumps({
                             "type": "transcript",
@@ -72,9 +68,27 @@ async def init_deepgram(reference_script, confirmed_words, websocket, ready_even
 
             asyncio.create_task(safe_send())
 
+        async def listen_for_control():
+            while websocket.client_state == WebSocketState.CONNECTED:
+                try:
+                    msg = await websocket.receive_text()
+                    data = json.loads(msg)
 
+                    if data.get("type") == "pause":
+                        control_state["paused"] = True
+                        print("⏸️ Received pause command.")
+                    elif data.get("type") == "resume":
+                        control_state["paused"] = False
+                        print("▶️ Received resume command.")
+                except Exception as e:
+                    print(f"⚠️ Error receiving control message: {e}")
+                    break
 
         dg_connection.registerHandler(dg_connection.event.TRANSCRIPT_RECEIVED, on_transcript)
+
+        # Start listening for pause/resume commands
+        asyncio.create_task(listen_for_control())
+
         ready_event.set()
         return dg_connection
 
